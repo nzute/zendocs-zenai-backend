@@ -1,4 +1,14 @@
-import "dotenv/config";
+import "dotenv/config"; // locally; harmless on Railway
+
+console.log("ENV CHECK:", {
+  SUPABASE_URL: !!process.env.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+  OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+  GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
+  CRON_SECRET: !!process.env.CRON_SECRET,
+});
+
+// import routes/handlers AFTER the log
 import express from "express";
 import cors from "cors";
 import { getSupabase, isFresh } from "./db";
@@ -35,12 +45,13 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-const supabase = getSupabase();
+// DO NOT call getSupabase() here globally
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Main endpoint: fetch/cached visa requirements
 app.post("/zen-ai", async (req, res) => {
+  const supabase = getSupabase();
   try {
     const {
       resident_country,
@@ -87,6 +98,7 @@ app.post("/zen-ai", async (req, res) => {
 
 // Secure monthly refresh endpoint (purge stale rows)
 app.post("/refresh", async (req, res) => {
+  const supabase = getSupabase();
   try {
     if (req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
@@ -102,6 +114,7 @@ app.post("/refresh", async (req, res) => {
 
 // Secure monthly repopulation: re-generate stale rows (not just delete)
 app.post("/repopulate", async (req, res) => {
+  const supabase = getSupabase();
   try {
     if (req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
