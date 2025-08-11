@@ -158,7 +158,18 @@ app.post("/zen-ai", async (req, res) => {
 
   // Handle force_refresh: if true, always retry regardless of freshness
   const fresh = existing && isFresh(existing.last_updated) && !force_refresh;
-  const nextStatus = fresh ? "ready" : (existing ? "refreshing" : "queued");
+  
+  // Set appropriate status for real-time frontend updates
+  let nextStatus;
+  if (fresh) {
+    nextStatus = "ready";
+  } else if (force_refresh && existing?.status === "error") {
+    nextStatus = "processing"; // Show retry progress
+  } else if (existing) {
+    nextStatus = "refreshing";
+  } else {
+    nextStatus = "queued";
+  }
 
   await supabase.from("visa_requirements_cache").upsert({
     ...baseKey,
@@ -173,6 +184,12 @@ app.post("/zen-ai", async (req, res) => {
   if (!fresh || force_refresh) {
     (async () => {
       try {
+        // Update status to "processing" to show real-time progress
+        await supabase.from("visa_requirements_cache").update({
+          status: "processing",
+          updated_at: new Date().toISOString()
+        }).match(baseKey);
+        
         const up = await generateAndUpsert(supabase, { ...baseKey, res_nat_dest_cat_type }, provider);
         // mark ready
         await supabase.from("visa_requirements_cache").update({
