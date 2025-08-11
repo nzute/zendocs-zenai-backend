@@ -147,6 +147,15 @@ app.post("/zen-ai", async (req, res) => {
   // 1) Upsert a placeholder row immediately (so the page has something to key off)
   const baseKey = { resident_country, nationality, destination, visa_category, visa_type };
   const nowISO = new Date().toISOString();
+  
+  // Create the concatenated key column
+  const res_nat_dest_cat_type = [
+    resident_country,
+    nationality,
+    destination,
+    visa_category,
+    visa_type,
+  ].map(s => s.trim().toLowerCase()).join("|");
 
   // Decide status: if we have a fresh row, keep ready; else queue/refresh
   const { data: existing } = await supabase
@@ -160,6 +169,7 @@ app.post("/zen-ai", async (req, res) => {
 
   await supabase.from("visa_requirements_cache").upsert({
     ...baseKey,
+    res_nat_dest_cat_type,
     status: nextStatus,
     updated_at: nowISO
   }, {

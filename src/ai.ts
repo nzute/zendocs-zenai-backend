@@ -353,14 +353,23 @@ export async function generateAndUpsert(
       throw e;
     }
 
-    // Upsert (explicit onConflict for clarity)
-    const row = {
-      ...combo,
-      ...payload,
-      raw_json: result,
-      source: provider,
-      last_updated: new Date().toISOString(),
-    };
+                // Upsert (explicit onConflict for clarity)
+            const res_nat_dest_cat_type = [
+              combo.resident_country,
+              combo.nationality,
+              combo.destination,
+              combo.visa_category,
+              combo.visa_type,
+            ].map(s => s.trim().toLowerCase()).join("|");
+
+            const row = {
+              ...combo,
+              res_nat_dest_cat_type,
+              ...payload,
+              raw_json: result,
+              source: provider,
+              last_updated: new Date().toISOString(),
+            };
 
     const { data: up, error: upErr } = await supabase
       .from("visa_requirements_cache")
