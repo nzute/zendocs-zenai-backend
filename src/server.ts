@@ -156,6 +156,7 @@ app.post("/zen-ai", async (req, res) => {
     .match(baseKey)
     .maybeSingle();
 
+  // Handle force_refresh: if true, always retry regardless of freshness
   const fresh = existing && isFresh(existing.last_updated) && !force_refresh;
   const nextStatus = fresh ? "ready" : (existing ? "refreshing" : "queued");
 
@@ -168,8 +169,8 @@ app.post("/zen-ai", async (req, res) => {
     onConflict: "resident_country,nationality,destination,visa_category,visa_type"
   });
 
-  // 2) Fire-and-forget background job to generate (only if not fresh)
-  if (!fresh) {
+  // 2) Fire-and-forget background job to generate (only if not fresh or force_refresh)
+  if (!fresh || force_refresh) {
     (async () => {
       try {
         const up = await generateAndUpsert(supabase, { ...baseKey, res_nat_dest_cat_type }, provider);
