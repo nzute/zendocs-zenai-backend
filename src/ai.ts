@@ -313,17 +313,18 @@ export async function callGeminiJson(systemPlusUser: string) {
   return JSON.parse(clean);
 }
 
-export async function generateAndUpsert(
-  supabase: SupabaseClient,
-  params: {
-    resident_country: string;
-    nationality: string;
-    destination: string;
-    visa_category: string;
-    visa_type: "Sticker Visa" | "eVisa" | "Visa on Arrival" | "ETA";
-  },
-  provider: Provider = "openai"
-) {
+        export async function generateAndUpsert(
+          supabase: SupabaseClient,
+          params: {
+            resident_country: string;
+            nationality: string;
+            destination: string;
+            visa_category: string;
+            visa_type: "Sticker Visa" | "eVisa" | "Visa on Arrival" | "ETA";
+            res_nat_dest_cat_type: string;
+          },
+          provider: Provider = "openai"
+        ) {
   const combo = { ...params }; // for logs
   try {
     const userPrompt = composeUserPrompt(params);
@@ -354,17 +355,8 @@ export async function generateAndUpsert(
     }
 
                 // Upsert (explicit onConflict for clarity)
-            const res_nat_dest_cat_type = [
-              combo.resident_country,
-              combo.nationality,
-              combo.destination,
-              combo.visa_category,
-              combo.visa_type,
-            ].map(s => s.trim().toLowerCase()).join("|");
-
             const row = {
               ...combo,
-              res_nat_dest_cat_type,
               ...payload,
               raw_json: result,
               source: provider,

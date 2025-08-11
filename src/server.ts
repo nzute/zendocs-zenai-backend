@@ -47,11 +47,11 @@ async function repopulateStale(opts: {
   const cutoffISO = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
   // fetch stale rows
-  const { data: stale, error } = await supabase
-    .from("visa_requirements_cache")
-    .select("resident_country, nationality, destination, visa_category, visa_type, last_updated")
-    .lt("last_updated", cutoffISO)
-    .limit(limit);
+            const { data: stale, error } = await supabase
+            .from("visa_requirements_cache")
+            .select("resident_country, nationality, destination, visa_category, visa_type, res_nat_dest_cat_type, last_updated")
+            .lt("last_updated", cutoffISO)
+            .limit(limit);
 
   if (error) throw error;
   if (!stale?.length) return { requested: 0, refreshed: 0, failed: 0, errors: [] };
@@ -82,19 +82,20 @@ async function repopulateStale(opts: {
   const limitRun = pLimit(concurrency);
   const results = await Promise.allSettled(
     combos.map((c) =>
-      limitRun(() =>
-        generateAndUpsert(
-          supabase,
-          {
-            resident_country: c.resident_country,
-            nationality: c.nationality,
-            destination: c.destination,
-            visa_category: c.visa_category,
-            visa_type: c.visa_type,
-          },
-          provider
-        )
-      )
+                    limitRun(() =>
+                generateAndUpsert(
+                  supabase,
+                  {
+                    resident_country: c.resident_country,
+                    nationality: c.nationality,
+                    destination: c.destination,
+                    visa_category: c.visa_category,
+                    visa_type: c.visa_type,
+                    res_nat_dest_cat_type: c.res_nat_dest_cat_type,
+                  },
+                  provider
+                )
+              )
     )
   );
 
@@ -136,9 +137,9 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.post("/zen-ai", async (req, res) => {
   const {
     resident_country, nationality, destination, visa_category, visa_type,
-    provider = "openai", force_refresh = false
+    res_nat_dest_cat_type, provider = "openai", force_refresh = false
   } = req.body || {};
-  for (const f of ["resident_country","nationality","destination","visa_category","visa_type"]) {
+  for (const f of ["resident_country","nationality","destination","visa_category","visa_type","res_nat_dest_cat_type"]) {
     if (!req.body?.[f]) return res.status(400).json({ error: `Missing field: ${f}` });
   }
 
@@ -147,15 +148,6 @@ app.post("/zen-ai", async (req, res) => {
   // 1) Upsert a placeholder row immediately (so the page has something to key off)
   const baseKey = { resident_country, nationality, destination, visa_category, visa_type };
   const nowISO = new Date().toISOString();
-  
-  // Create the concatenated key column
-  const res_nat_dest_cat_type = [
-    resident_country,
-    nationality,
-    destination,
-    visa_category,
-    visa_type,
-  ].map(s => s.trim().toLowerCase()).join("|");
 
   // Decide status: if we have a fresh row, keep ready; else queue/refresh
   const { data: existing } = await supabase
@@ -180,7 +172,7 @@ app.post("/zen-ai", async (req, res) => {
   if (!fresh) {
     (async () => {
       try {
-        const up = await generateAndUpsert(supabase, baseKey as any, provider);
+        const up = await generateAndUpsert(supabase, { ...baseKey, res_nat_dest_cat_type }, provider);
         // mark ready
         await supabase.from("visa_requirements_cache").update({
           status: "ready",
