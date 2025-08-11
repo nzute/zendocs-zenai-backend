@@ -1,6 +1,14 @@
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+function withTimeout<T>(p: Promise<T>, ms = 4500): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("AI_TIMEOUT")), ms);
+    p.then(v => { clearTimeout(t); resolve(v); })
+     .catch(e => { clearTimeout(t); reject(e); });
+  });
+}
+
 export type Provider = "openai" | "gemini";
 
 export const OutputSchema = z.object({
