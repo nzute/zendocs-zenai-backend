@@ -136,71 +136,65 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.post("/zen-ai", async (req, res) => {
   const {
     resident_country, nationality, destination, visa_category, visa_type,
-    provider = "openai", force_refresh = false,
+    provider = "openai", force_refresh = false
   } = req.body || {};
-
   for (const f of ["resident_country","nationality","destination","visa_category","visa_type"]) {
     if (!req.body?.[f]) return res.status(400).json({ error: `Missing field: ${f}` });
   }
 
   const supabase = getSupabase();
 
-  // 1) Cache lookup
+  // 1) Upsert a placeholder row immediately (so the page has something to key off)
+  const baseKey = { resident_country, nationality, destination, visa_category, visa_type };
+  const nowISO = new Date().toISOString();
+
+  // Decide status: if we have a fresh row, keep ready; else queue/refresh
   const { data: existing } = await supabase
     .from("visa_requirements_cache")
-    .select("*")
-    .eq("resident_country", resident_country)
-    .eq("nationality", nationality)
-    .eq("destination", destination)
-    .eq("visa_category", visa_category)
-    .eq("visa_type", visa_type)
+    .select("last_updated,status")
+    .match(baseKey)
     .maybeSingle();
 
   const fresh = existing && isFresh(existing.last_updated) && !force_refresh;
+  const nextStatus = fresh ? "ready" : (existing ? "refreshing" : "queued");
 
-  if (fresh) {
-    // Always <5s
-    return res.json({ source: "cache", ...existing });
+  await supabase.from("visa_requirements_cache").upsert({
+    ...baseKey,
+    status: nextStatus,
+    updated_at: nowISO
+  }, {
+    onConflict: "resident_country,nationality,destination,visa_category,visa_type"
+  });
+
+  // 2) Fire-and-forget background job to generate (only if not fresh)
+  if (!fresh) {
+    (async () => {
+      try {
+        const up = await generateAndUpsert(supabase, baseKey as any, provider);
+        // mark ready
+        await supabase.from("visa_requirements_cache").update({
+          status: "ready",
+          updated_at: new Date().toISOString(),
+          last_updated: new Date().toISOString()
+        }).match(baseKey);
+      } catch (err) {
+        // mark error but keep placeholder so UI can show retry
+        await supabase.from("visa_requirements_cache").update({
+          status: "error",
+          updated_at: new Date().toISOString()
+        }).match(baseKey);
+        console.error("BG gen error", err);
+      }
+    })();
   }
 
-  // 2) Mark row as refreshing (helps UI show spinner if you want)
-  if (existing) {
-    await supabase.from("visa_requirements_cache")
-      .update({ status: "refreshing", updated_at: new Date().toISOString() })
-      .match({
-        resident_country, nationality, destination, visa_category, visa_type
-      });
-  }
-
-  // 3) Try to generate within 4.5s
-  const work = generateAndUpsert(supabase, {
-    resident_country, nationality, destination, visa_category, visa_type
-  }, provider);
-
-  try {
-    const up = await withTimeout(work, 4500); // hard cap to meet 5s SLA
-    return res.json({ source: provider, ...up });
-  } catch (e: any) {
-    // 4) Missed the 5s window — finish in background and respond fast
-    work.then(() => {
-      // best-effort: we could flip status back to ready here if needed,
-      // but upsert in generateAndUpsert already writes final state.
-    }).catch(() => {
-      supabase.from("visa_requirements_cache").update({
-        status: "error", updated_at: new Date().toISOString()
-      }).match({ resident_country, nationality, destination, visa_category, visa_type });
-    });
-
-    if (existing) {
-      // Return stale data immediately but label it; UI can subscribe for update
-      return res.status(200).json({ source: "stale", ...existing });
-    }
-    // No cache at all: return 202 so UI knows to poll/subscribe
-    return res.status(202).json({
-      status: "queued",
-      resident_country, nationality, destination, visa_category, visa_type
-    });
-  }
+  // 3) Return immediately so frontend can navigate & show shimmer
+  // If fresh, you *can* also include data here, but your flow wants the page to load by keys.
+  return res.status(fresh ? 200 : 202).json({
+    ok: true,
+    status: nextStatus,
+    ...baseKey
+  });
 });
 
 // Secure monthly refresh endpoint (purge stale rows)
