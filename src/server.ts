@@ -11,6 +11,7 @@ console.log("ENV CHECK:", {
 // import routes/handlers AFTER the log
 import express from "express";
 import cors from "cors";
+import cron from "node-cron";
 import { getSupabase, isFresh } from "./db";
 import {
   OutputSchema,
@@ -22,6 +23,79 @@ import {
   type Provider,
 } from "./ai";
 import { serializeErr } from "./errors";
+
+// shared repopulate function
+async function repopulateStale(opts: {
+  days: number;
+  provider: Provider;
+  limit: number;
+  concurrency: number;
+}) {
+  const supabase = getSupabase();
+  const { days, provider, limit, concurrency } = opts;
+
+  // cutoff
+  const cutoffISO = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  // fetch stale rows
+  const { data: stale, error } = await supabase
+    .from("visa_requirements_cache")
+    .select("resident_country, nationality, destination, visa_category, visa_type, last_updated")
+    .lt("last_updated", cutoffISO)
+    .limit(limit);
+
+  if (error) throw error;
+  if (!stale?.length) return { requested: 0, refreshed: 0, failed: 0, errors: [] };
+
+  // dedupe by key
+  const key = (r: any) =>
+    [r.resident_country, r.nationality, r.destination, r.visa_category, r.visa_type].join("|");
+  const map = new Map<string, any>();
+  for (const r of stale) map.set(key(r), r);
+  const combos = Array.from(map.values());
+
+  // tiny concurrency limiter
+  function pLimit(n: number) {
+    const q: Array<() => void> = [];
+    let active = 0;
+    const next = () => { active--; q.shift()?.(); };
+    return <T>(fn: () => Promise<T>) =>
+      new Promise<T>((resolve, reject) => {
+        const run = () => {
+          active++;
+          fn().then((v) => { resolve(v); next(); })
+             .catch((e) => { reject(e); next(); });
+        };
+        active < n ? run() : q.shift()?.();
+      });
+  }
+
+  const limitRun = pLimit(concurrency);
+  const results = await Promise.allSettled(
+    combos.map((c) =>
+      limitRun(() =>
+        generateAndUpsert(
+          supabase,
+          {
+            resident_country: c.resident_country,
+            nationality: c.nationality,
+            destination: c.destination,
+            visa_category: c.visa_category,
+            visa_type: c.visa_type,
+          },
+          provider
+        )
+      )
+    )
+  );
+
+  const refreshed = results.filter(r => r.status === "fulfilled").length;
+  const errors = results
+    .map((r, i) => r.status === "rejected" ? { combo: combos[i], error: String((r as any).reason) } : null)
+    .filter(Boolean);
+
+  return { requested: combos.length, refreshed, failed: errors.length, errors };
+}
 
 // simple concurrency limiter
 function pLimit(concurrency: number) {
@@ -114,79 +188,19 @@ app.post("/refresh", async (req, res) => {
 
 // Secure monthly repopulation: re-generate stale rows (not just delete)
 app.post("/repopulate", async (req, res) => {
-  const supabase = getSupabase();
   try {
     if (req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
       return res.status(401).json({ error: "unauthorized" });
     }
-
     const days = Number(req.body?.days ?? 30);
-    const provider: Provider = (req.body?.provider ?? "openai") as Provider;
-    const limit = Number(req.body?.limit ?? 100);       // max rows to refresh in one run
-    const concurrency = Number(req.body?.concurrency ?? 3); // parallelism
+    const provider = (req.body?.provider ?? "openai") as Provider;
+    const limit = Number(req.body?.limit ?? 100);
+    const concurrency = Number(req.body?.concurrency ?? 3);
 
-    // 1) Get stale rows (older than X days)
-    const cutoffISO = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    const { data: stale, error } = await supabase
-      .from("visa_requirements_cache")
-      .select("resident_country, nationality, destination, visa_category, visa_type, last_updated")
-      .lt("last_updated", cutoffISO)
-      .limit(limit);
-
-    if (error) throw error;
-    if (!stale || stale.length === 0) {
-      return res.json({ ok: true, refreshed: 0, message: `No rows older than ${days} days.` });
-    }
-
-    // 2) Deduplicate by unique key (defensive; table already has a unique constraint)
-    const key = (r: any) =>
-      [r.resident_country, r.nationality, r.destination, r.visa_category, r.visa_type].join("|");
-    const map = new Map<string, any>();
-    for (const r of stale) map.set(key(r), r);
-    const combos = Array.from(map.values());
-
-    // 3) Process in batches with concurrency control
-    const limitFn = pLimit(concurrency);
-    const results = await Promise.allSettled(
-      combos.map((c) =>
-        limitFn(() =>
-          generateAndUpsert(supabase, {
-            resident_country: c.resident_country,
-            nationality: c.nationality,
-            destination: c.destination,
-            visa_category: c.visa_category,
-            visa_type: c.visa_type,
-          }, provider)
-        )
-      )
-    );
-
-    const refreshed = results.filter(r => r.status === "fulfilled").length;
-    const errors = results
-      .map((r, i) =>
-        r.status === "rejected"
-          ? {
-              combo: combos[i],
-              error: serializeErr((r as any).reason),
-            }
-          : null
-      )
-      .filter(Boolean) as any[];
-
-    console.error("REPOPULATE_ERRORS", errors); // server logs
-    return res.json({
-      ok: true,
-      days,
-      provider,
-      requested: combos.length,
-      refreshed,
-      failed: errors.length,
-      errors: errors.slice(0, 10), // trim payload
-    });
+    const summary = await repopulateStale({ days, provider, limit, concurrency });
+    res.json({ ok: true, days, provider, ...summary });
   } catch (e: any) {
-    const err = serializeErr(e);
-    console.error("ZEN-AI ERROR", err);
-    res.status(500).json({ error: err });
+    res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
@@ -197,6 +211,34 @@ console.log("ENV CHECK:", {
   GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
   CRON_SECRET: !!process.env.CRON_SECRET,
 });
+
+// Internal cron job configuration
+const cronEnabled = process.env.ENABLE_INTERNAL_CRON === "true";
+const cronExpr = process.env.INTERNAL_CRON_EXPR || "0 3 1 * *"; // 03:00 on the 1st (UTC)
+const cronDays = Number(process.env.INTERNAL_CRON_DAYS || 30);
+const cronProvider = (process.env.INTERNAL_CRON_PROVIDER || "openai") as Provider;
+const cronLimit = Number(process.env.INTERNAL_CRON_LIMIT || 100);
+const cronConcurrency = Number(process.env.INTERNAL_CRON_CONCURRENCY || 3);
+
+if (cronEnabled) {
+  console.log(`[CRON] enabled. expr=${cronExpr}, days=${cronDays}, provider=${cronProvider}, limit=${cronLimit}, concurrency=${cronConcurrency}`);
+  cron.schedule(cronExpr, async () => {
+    try {
+      console.log("[CRON] repopulate starting…");
+      const summary = await repopulateStale({
+        days: cronDays,
+        provider: cronProvider,
+        limit: cronLimit,
+        concurrency: cronConcurrency,
+      });
+      console.log("[CRON] repopulate done:", summary);
+    } catch (err) {
+      console.error("[CRON] repopulate error:", err);
+    }
+  });
+} else {
+  console.log("[CRON] disabled (set ENABLE_INTERNAL_CRON=true to enable).");
+}
 
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => console.log(`Zen AI running on http://localhost:${port}`));
