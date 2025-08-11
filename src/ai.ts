@@ -11,6 +11,17 @@ function withTimeout<T>(p: Promise<T>, ms = 4500): Promise<T> {
 
 export type Provider = "openai" | "gemini";
 
+// Content check function for post-arrival requirements
+function hasPostArrival(text: string) {
+  const t = (text || "").toLowerCase();
+  const markers = [
+    "after you arrive", "residence permit", "residence card",
+    "brp", "carte de séjour", "aufenthaltstitel", "emirates id",
+    "address registration", "anmeldung", "prefecture", "ausländerbehörde"
+  ];
+  return markers.some(m => t.includes(m));
+}
+
 export const OutputSchema = z.object({
   eligibility_and_documents: z.string().nullable().default(null),
   embassy_contact:           z.string().nullable().default(null),
@@ -177,6 +188,31 @@ AI Rules Recap:
 • Always tie details back to traveler's nationality, resident country, and destination
 • Make it comprehensive enough that travelers don't need to Google anything else
 
+Post-arrival requirements (MANDATORY):
+If the visa leads to post-arrival steps (common for Work/Study/Family/Investment/Type-D long-stay, UAE entry permits, UK BRP, EU residence permits, etc.), you must include a clearly labeled paragraph starting with "After you arrive:" that covers:
+• whether you must convert the entry visa to a temporary residence permit / residence card (e.g., BRP in the UK, Carte de Séjour in France, Aufenthaltstitel in Germany, Emirates ID in UAE),
+• where to go (authority/office or portal),
+• deadline (e.g., within 3–10 days / 30 days),
+• biometrics/medical steps,
+• documents to bring,
+• fees or typical range,
+• collection time and how you'll be notified,
+• official link if certain (else write "link: null" in link fields).
+If no post-arrival step exists, explicitly say: "After you arrive: There's no conversion or local registration required for this visa."
+
+Examples:
+Example (France – Type D Student):
+"After you arrive: You'll validate your long-stay visa online within 3 months to receive your residence permit. Go to the official portal, pay the tax stamp (≈ EUR 50–60), and upload your visa details and address. If requested, attend biometrics at the prefecture. Missing the deadline can lead to overstay problems."
+
+Example (UK – Work Visa):
+"After you arrive: Pick up your BRP within 10 days or before your vignette expires (whichever is later) at the Post Office location shown in your decision letter. Bring your passport and decision letter. Late collection may affect your status."
+
+Example (Germany – Work/Study):
+"After you arrive: Register your address (Anmeldung) within 14 days at the local Bürgeramt, then book an appointment with the Ausländerbehörde to get your Aufenthaltstitel (residence permit). Bring passport, biometrics photos, proof of housing, insurance, and bank statements. Fees are typically EUR 50–110."
+
+Example (UAE – Entry Permit → Emirates ID):
+"After you arrive: Complete medical fitness, biometrics, and Emirates ID issuance within 30 days via the ICP/GDRFA portal or approved centers. Carry passport, entry permit, photos, and insurance. Fees vary by emirate and category."
+
 how_to_apply_sticker:
 Step by step, should be numbered (1., 2., 3., etc.).
 Include: create account/portal, forms, uploads, booking appointment, fee payment, biometrics, passport submission/return, status tracking, collection.
@@ -341,18 +377,34 @@ export async function callGeminiJson(systemPlusUser: string) {
       throw e;
     }
 
-    let payload: any;
-    try {
-      payload = OutputSchema.parse(result);
-    } catch (e: any) {
-      // include a preview so we can see what model returned
-      const preview = typeof result === "string" ? result.slice(0, 600) : JSON.stringify(result).slice(0, 600);
-      e.name = "ZodValidationError";
-      e.preview = preview;
-      e.provider = provider;
-      e.combo = combo;
-      throw e;
-    }
+                let payload: any;
+            try {
+              payload = OutputSchema.parse(result);
+            } catch (e: any) {
+              // include a preview so we can see what model returned
+              const preview = typeof result === "string" ? result.slice(0, 600) : JSON.stringify(result).slice(0, 600);
+              e.name = "ZodValidationError";
+              e.preview = preview;
+              e.provider = provider;
+              e.combo = combo;
+              throw e;
+            }
+
+            // Content check: ensure post-arrival requirements are included
+            if (!hasPostArrival(payload.visa_details)) {
+              try {
+                // one-shot refinement prompt
+                const refine = await callOpenAIJson(
+                  SYSTEM_INSTRUCTIONS,
+                  `Traveller:\n${JSON.stringify(params)}\n\nYour previous output missed the mandatory "After you arrive" paragraph.\nReturn the SAME JSON object again, but update "visa_details" to add that paragraph with deadlines, office/portal, biometrics/medical, documents, fees, and an official link if certain.\nRemember: JSON only.`
+                );
+                const refined = OutputSchema.parse(refine);
+                payload = refined; // overwrite with refined content
+              } catch (refineError) {
+                // If refinement fails, continue with original payload
+                console.error("Post-arrival refinement failed:", refineError);
+              }
+            }
 
                 // Upsert (explicit onConflict for clarity)
             const row = {
