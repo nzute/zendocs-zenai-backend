@@ -177,5 +177,13 @@ app.post("/repopulate", async (req, res) => {
   }
 });
 
+console.log("ENV CHECK:", {
+  SUPABASE_URL: !!process.env.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+  OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+  GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
+  CRON_SECRET: !!process.env.CRON_SECRET,
+});
+
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => console.log(`Zen AI running on http://localhost:${port}`));

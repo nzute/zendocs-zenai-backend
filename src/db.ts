@@ -1,16 +1,24 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-const url = process.env.SUPABASE_URL!;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
-if (!url || !serviceKey) {
-  throw new Error("Supabase env vars missing");
-}
-
-export const supabase = createClient(url, serviceKey);
+let _client: SupabaseClient | null = null;
 
 export function getSupabase() {
-  return supabase;
+  if (_client) return _client;
+
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  // Better error message with booleans so logs are helpful
+  if (!url || !key) {
+    console.error("ENV MISS:", {
+      SUPABASE_URL: !!url,
+      SUPABASE_SERVICE_ROLE_KEY: !!key,
+    });
+    throw new Error("Supabase env vars missing at runtime");
+  }
+
+  _client = createClient(url, key);
+  return _client;
 }
 
 export function isFresh(iso: string, days = 30) {
