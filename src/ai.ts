@@ -253,36 +253,50 @@ export async function callOpenAIJson(system: string, user: string) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error("OPENAI_API_KEY not set");
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    }),
-  });
-  
-  const requestId = res.headers.get("x-request-id");
-  if (!res.ok) {
-    const body = await res.text();
-    const err: any = new Error(`OpenAI ${res.status}`);
-    err.status = res.status;
-    err.body = body.slice(0, 800);
-    err.requestId = requestId;
-    throw err;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 4000); // 4 second timeout
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+    
+    const requestId = res.headers.get("x-request-id");
+    if (!res.ok) {
+      const body = await res.text();
+      const err: any = new Error(`OpenAI ${res.status}`);
+      err.status = res.status;
+      err.body = body.slice(0, 800);
+      err.requestId = requestId;
+      throw err;
+    }
+    
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content ?? "{}";
+    return JSON.parse(content);
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error("OpenAI request timeout (4s)");
+    }
+    throw error;
   }
-  
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content ?? "{}";
-  return JSON.parse(content);
 }
 
 export async function callGeminiJson(systemPlusUser: string) {

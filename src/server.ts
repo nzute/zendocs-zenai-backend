@@ -126,6 +126,16 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // Main endpoint: fetch/cached visa requirements
 app.post("/zen-ai", async (req, res) => {
   const supabase = getSupabase();
+  
+  // Set 5-second timeout for the entire request
+  const timeout = setTimeout(() => {
+    res.status(408).json({ 
+      error: "Request timeout - please try again",
+      source: "timeout",
+      message: "Response took longer than 5 seconds"
+    });
+  }, 5000);
+
   try {
     const {
       resident_country,
@@ -138,10 +148,13 @@ app.post("/zen-ai", async (req, res) => {
     } = req.body || {};
 
     for (const f of ["resident_country", "nationality", "destination", "visa_category", "visa_type"]) {
-      if (!req.body?.[f]) return res.status(400).json({ error: `Missing field: ${f}` });
+      if (!req.body?.[f]) {
+        clearTimeout(timeout);
+        return res.status(400).json({ error: `Missing field: ${f}` });
+      }
     }
 
-    // 1) Cache lookup
+    // 1) Cache lookup (fast - should be < 100ms)
     const { data: existing, error: selErr } = await supabase
       .from("visa_requirements_cache")
       .select("*")
@@ -153,19 +166,48 @@ app.post("/zen-ai", async (req, res) => {
       .maybeSingle();
     if (selErr) throw selErr;
 
+    // 2) Return cached data if fresh (fastest path)
     if (existing && !force_refresh && isFresh(existing.last_updated)) {
+      clearTimeout(timeout);
       return res.json({ source: "cache", ...existing });
     }
 
-    // 2) Generate and upsert using the unified function
-    const up = await generateAndUpsert(
-      supabase,
-      { resident_country, nationality, destination, visa_category, visa_type },
-      provider as Provider
-    );
+    // 3) If stale data exists, return it immediately while refreshing in background
+    if (existing && !force_refresh) {
+      // Return stale data immediately
+      clearTimeout(timeout);
+      res.json({ 
+        source: "stale_cache", 
+        ...existing,
+        message: "Data is being refreshed in background"
+      });
+      
+      // Refresh in background (don't wait for it)
+      generateAndUpsert(
+        supabase,
+        { resident_country, nationality, destination, visa_category, visa_type },
+        provider as Provider
+      ).catch(err => console.error("Background refresh failed:", err));
+      
+      return;
+    }
 
+    // 4) No cache exists - generate with timeout
+    const up = await Promise.race([
+      generateAndUpsert(
+        supabase,
+        { resident_country, nationality, destination, visa_category, visa_type },
+        provider as Provider
+      ),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("AI generation timeout")), 4500)
+      )
+    ]);
+
+    clearTimeout(timeout);
     res.json({ source: provider, ...up });
   } catch (e: any) {
+    clearTimeout(timeout);
     res.status(500).json({ error: String(e?.message || e) });
   }
 });
