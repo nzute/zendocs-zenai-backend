@@ -173,15 +173,21 @@ app.post("/zen-ai", async (req, res) => {
   const nowISO = new Date().toISOString();
   const base = { resident_country, nationality, destination, visa_category, visa_type };
 
-  // Decide status: if we have a fresh row, keep ready; else queue/refresh
+  // Check if row exists and is complete (has both res_nat_dest_cat_type and visa_description)
   const { data: existing } = await supabase
     .from("visa_requirements_cache")
-    .select("last_updated,status")
+    .select("last_updated,status,res_nat_dest_cat_type,visa_description")
     .match(baseKey)
     .maybeSingle();
 
+  // Verify if the row is complete (has both required fields)
+  const isComplete = existing && 
+    existing.res_nat_dest_cat_type && 
+    existing.visa_description && 
+    existing.res_nat_dest_cat_type === res_nat_dest_cat_type;
+
   // Handle force_refresh: if true, always retry regardless of freshness
-  const fresh = existing && isFresh(existing.last_updated) && !force_refresh;
+  const fresh = existing && isFresh(existing.last_updated) && !force_refresh && isComplete;
   
   // Set appropriate status for real-time frontend updates
   let nextStatus;
@@ -189,6 +195,10 @@ app.post("/zen-ai", async (req, res) => {
     nextStatus = "ready";
   } else if (force_refresh && existing?.status === "error") {
     nextStatus = "processing"; // Show retry progress
+  } else if (existing && !isComplete) {
+    // Row exists but is incomplete - need to complete it
+    nextStatus = "processing";
+    console.log(`🔄 Row exists but incomplete for ${res_nat_dest_cat_type}, completing...`);
   } else if (existing) {
     nextStatus = "refreshing";
   } else {
@@ -211,8 +221,8 @@ app.post("/zen-ai", async (req, res) => {
   const supabaseDuration = Date.now() - supabaseStart;
   console.log(`🗄️ Supabase Status Update: ${supabaseDuration}ms (${nextStatus})`);
 
-  // 2) Fire-and-forget background job to generate (only if not fresh or force_refresh)
-  if (!fresh || force_refresh) {
+  // 2) Fire-and-forget background job to generate (only if not fresh, force_refresh, or incomplete row)
+  if (!fresh || force_refresh || (existing && !isComplete)) {
     (async () => {
       try {
         // PRIORITY: Update Firebase status to "processing" FIRST
@@ -228,6 +238,16 @@ app.post("/zen-ai", async (req, res) => {
         console.log(`🗄️ Supabase Processing Update: ${supabaseProcessingDuration}ms`);
         
         const aiStart = Date.now();
+        
+        // Log the scenario we're handling
+        if (existing && !isComplete) {
+          console.log(`🔧 Completing existing incomplete row for ${res_nat_dest_cat_type}`);
+        } else if (force_refresh) {
+          console.log(`🔄 Force refreshing row for ${res_nat_dest_cat_type}`);
+        } else {
+          console.log(`🆕 Creating new row for ${res_nat_dest_cat_type}`);
+        }
+        
         const up = await generateAndUpsert(
           supabase,
           {
