@@ -1,4 +1,5 @@
 import { getFirestore } from "./firebase";
+import { Timestamp } from "firebase-admin/firestore";
 
 export async function mirrorVisaStatus(
   docId: string,
@@ -19,7 +20,8 @@ export async function mirrorVisaStatus(
       {
         ...base,
         status,
-        updated_at: new Date().toISOString(),
+        updated_at: Timestamp.now(),
+        created_at: Timestamp.now(),
       },
       { merge: true }
     );
@@ -38,6 +40,27 @@ export async function mirrorVisaStatus(
   }
 }
 
+// Convert ISO date strings to Firebase Timestamps
+function convertDatesToTimestamps(data: Record<string, any>): Record<string, any> {
+  const converted = { ...data };
+  
+  // Convert known date fields
+  const dateFields = ['updated_at', 'created_at', 'last_updated'];
+  
+  for (const field of dateFields) {
+    if (converted[field] && typeof converted[field] === 'string') {
+      try {
+        converted[field] = Timestamp.fromDate(new Date(converted[field]));
+      } catch (e) {
+        console.warn(`Failed to convert ${field} to Timestamp:`, converted[field]);
+        converted[field] = Timestamp.now();
+      }
+    }
+  }
+  
+  return converted;
+}
+
 export async function mirrorVisaPayload(
   docId: string,
   data: Record<string, any>
@@ -46,11 +69,16 @@ export async function mirrorVisaPayload(
   try {
     console.log(`🔥 Attempting Firebase full payload update for: ${docId}`);
     const db = getFirestore();
+    
+    // Convert any date strings to Firebase Timestamps
+    const convertedData = convertDatesToTimestamps(data);
+    
     await db.collection("visa_cache").doc(docId).set(
       {
-        ...data,
+        ...convertedData,
         status: "ready",
-        updated_at: new Date().toISOString(),
+        updated_at: Timestamp.now(),
+        created_at: Timestamp.now(),
       },
       { merge: true }
     );
