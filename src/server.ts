@@ -32,6 +32,7 @@ async function withTimeout<T>(p: Promise<T>, ms = 4500): Promise<T> {
   });
 }
 import { serializeErr } from "./errors";
+import { mirrorVisaStatus, mirrorVisaPayload } from "./mirror";
 
 // shared repopulate function
 async function repopulateStale(opts: {
@@ -81,22 +82,44 @@ async function repopulateStale(opts: {
 
   const limitRun = pLimit(concurrency);
   const results = await Promise.allSettled(
-    combos.map((c) =>
-                    limitRun(() =>
-                generateAndUpsert(
-                  supabase,
-                  {
-                    resident_country: c.resident_country,
-                    nationality: c.nationality,
-                    destination: c.destination,
-                    visa_category: c.visa_category,
-                    visa_type: c.visa_type,
-                    res_nat_dest_cat_type: c.res_nat_dest_cat_type,
-                  },
-                  provider
-                )
-              )
-    )
+    combos.map(async (c) => {
+      try {
+        const row = await limitRun(() =>
+          generateAndUpsert(
+            supabase,
+            {
+              resident_country: c.resident_country,
+              nationality: c.nationality,
+              destination: c.destination,
+              visa_category: c.visa_category,
+              visa_type: c.visa_type,
+              res_nat_dest_cat_type: c.res_nat_dest_cat_type,
+            },
+            provider
+          )
+        );
+        
+        // Mirror successful repopulate to Firebase
+        await mirrorVisaPayload(row.res_nat_dest_cat_type, {
+          ...row, // whatever you selected/returned after upsert
+          res_nat_dest_cat_type: row.res_nat_dest_cat_type,
+          source: provider,
+          last_updated: new Date().toISOString(),
+        });
+        
+        return row;
+      } catch (error) {
+        // Mirror error status to Firebase
+        await mirrorVisaStatus(c.res_nat_dest_cat_type, "error", {
+          resident_country: c.resident_country,
+          nationality: c.nationality,
+          destination: c.destination,
+          visa_category: c.visa_category,
+          visa_type: c.visa_type,
+        });
+        throw error;
+      }
+    })
   );
 
   const refreshed = results.filter(r => r.status === "fulfilled").length;
@@ -180,6 +203,12 @@ app.post("/zen-ai", async (req, res) => {
     onConflict: "resident_country,nationality,destination,visa_category,visa_type"
   });
 
+  // keys & cache_key already built earlier
+  const base = { resident_country, nationality, destination, visa_category, visa_type };
+
+  // mirror placeholder/status to Firestore so FF can listen there too
+  await mirrorVisaStatus(res_nat_dest_cat_type, nextStatus as any, base);
+
   // 2) Fire-and-forget background job to generate (only if not fresh or force_refresh)
   if (!fresh || force_refresh) {
     (async () => {
@@ -190,7 +219,23 @@ app.post("/zen-ai", async (req, res) => {
           updated_at: new Date().toISOString()
         }).match(baseKey);
         
-        const up = await generateAndUpsert(supabase, { ...baseKey, res_nat_dest_cat_type }, provider);
+        const up = await generateAndUpsert(
+          supabase,
+          {
+            resident_country, nationality, destination, visa_category, visa_type,
+            res_nat_dest_cat_type
+          },
+          provider
+        );
+
+        // mirror full payload to Firestore (up already includes all fields)
+        await mirrorVisaPayload(res_nat_dest_cat_type, {
+          ...up, // includes all the visa_* fields you store in Supabase
+          res_nat_dest_cat_type,
+          source: provider,
+          last_updated: new Date().toISOString(),
+        });
+        
         // mark ready
         await supabase.from("visa_requirements_cache").update({
           status: "ready",
@@ -198,12 +243,14 @@ app.post("/zen-ai", async (req, res) => {
           last_updated: new Date().toISOString()
         }).match(baseKey);
       } catch (err) {
+        await mirrorVisaStatus(res_nat_dest_cat_type, "error", base);
+        console.error("BG gen error", err);
+        
         // mark error but keep placeholder so UI can show retry
         await supabase.from("visa_requirements_cache").update({
           status: "error",
           updated_at: new Date().toISOString()
         }).match(baseKey);
-        console.error("BG gen error", err);
       }
     })();
   }
