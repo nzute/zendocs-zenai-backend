@@ -322,6 +322,10 @@ console.log("ENV CHECK:", {
   OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
   GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
   CRON_SECRET: !!process.env.CRON_SECRET,
+  FIREBASE_SERVICE_ACCOUNT: !!process.env.FIREBASE_SERVICE_ACCOUNT,
+  FIREBASE_PROJECT_ID: !!process.env.FIREBASE_PROJECT_ID,
+  FIREBASE_CLIENT_EMAIL: !!process.env.FIREBASE_CLIENT_EMAIL,
+  FIREBASE_PRIVATE_KEY: !!process.env.FIREBASE_PRIVATE_KEY,
 });
 
 // Internal cron job configuration
