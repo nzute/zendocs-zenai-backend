@@ -11,6 +11,7 @@ export async function mirrorVisaStatus(
     visa_type: string;
   }
 ) {
+  const startTime = Date.now();
   try {
     const db = getFirestore();
     await db.collection("visa_cache").doc(docId).set(
@@ -21,8 +22,11 @@ export async function mirrorVisaStatus(
       },
       { merge: true }
     );
+    const duration = Date.now() - startTime;
+    console.log(`🔥 Firebase Status Update: ${duration}ms (${status})`);
   } catch (e) {
-    console.error("mirrorVisaStatus failed:", e);
+    const duration = Date.now() - startTime;
+    console.error(`🔥 Firebase Status Update FAILED: ${duration}ms (${status})`, e);
   }
 }
 
@@ -30,6 +34,7 @@ export async function mirrorVisaPayload(
   docId: string,
   data: Record<string, any>
 ) {
+  const startTime = Date.now();
   try {
     const db = getFirestore();
     await db.collection("visa_cache").doc(docId).set(
@@ -40,7 +45,10 @@ export async function mirrorVisaPayload(
       },
       { merge: true }
     );
+    const duration = Date.now() - startTime;
+    console.log(`🔥 Firebase Full Payload: ${duration}ms`);
   } catch (e) {
-    console.error("mirrorVisaPayload failed:", e);
+    const duration = Date.now() - startTime;
+    console.error(`🔥 Firebase Full Payload FAILED: ${duration}ms`, e);
   }
 }

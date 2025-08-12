@@ -199,6 +199,7 @@ app.post("/zen-ai", async (req, res) => {
   await mirrorVisaStatus(res_nat_dest_cat_type, nextStatus as any, base);
 
   // Then update Supabase
+  const supabaseStart = Date.now();
   await supabase.from("visa_requirements_cache").upsert({
     ...baseKey,
     res_nat_dest_cat_type,
@@ -207,6 +208,8 @@ app.post("/zen-ai", async (req, res) => {
   }, {
     onConflict: "resident_country,nationality,destination,visa_category,visa_type"
   });
+  const supabaseDuration = Date.now() - supabaseStart;
+  console.log(`🗄️ Supabase Status Update: ${supabaseDuration}ms (${nextStatus})`);
 
   // 2) Fire-and-forget background job to generate (only if not fresh or force_refresh)
   if (!fresh || force_refresh) {
@@ -216,11 +219,15 @@ app.post("/zen-ai", async (req, res) => {
         await mirrorVisaStatus(res_nat_dest_cat_type, "processing", base);
         
         // Then update Supabase status
+        const supabaseProcessingStart = Date.now();
         await supabase.from("visa_requirements_cache").update({
           status: "processing",
           updated_at: new Date().toISOString()
         }).match(baseKey);
+        const supabaseProcessingDuration = Date.now() - supabaseProcessingStart;
+        console.log(`🗄️ Supabase Processing Update: ${supabaseProcessingDuration}ms`);
         
+        const aiStart = Date.now();
         const up = await generateAndUpsert(
           supabase,
           {
@@ -229,6 +236,8 @@ app.post("/zen-ai", async (req, res) => {
           },
           provider
         );
+        const aiDuration = Date.now() - aiStart;
+        console.log(`🤖 AI Generation + Supabase Upsert: ${aiDuration}ms`);
 
         // PRIORITY: Send full payload to Firebase FIRST
         await mirrorVisaPayload(res_nat_dest_cat_type, {
@@ -239,21 +248,27 @@ app.post("/zen-ai", async (req, res) => {
         });
         
         // Then mark Supabase as ready
+        const supabaseReadyStart = Date.now();
         await supabase.from("visa_requirements_cache").update({
           status: "ready",
           updated_at: new Date().toISOString(),
           last_updated: new Date().toISOString()
         }).match(baseKey);
+        const supabaseReadyDuration = Date.now() - supabaseReadyStart;
+        console.log(`🗄️ Supabase Ready Update: ${supabaseReadyDuration}ms`);
       } catch (err) {
         // PRIORITY: Update Firebase error status FIRST
         await mirrorVisaStatus(res_nat_dest_cat_type, "error", base);
         console.error("BG gen error", err);
         
         // Then mark Supabase error
+        const supabaseErrorStart = Date.now();
         await supabase.from("visa_requirements_cache").update({
           status: "error",
           updated_at: new Date().toISOString()
         }).match(baseKey);
+        const supabaseErrorDuration = Date.now() - supabaseErrorStart;
+        console.log(`🗄️ Supabase Error Update: ${supabaseErrorDuration}ms`);
       }
     })();
   }
