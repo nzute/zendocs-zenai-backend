@@ -99,7 +99,7 @@ async function repopulateStale(opts: {
           )
         );
         
-        // Mirror successful repopulate to Firebase
+        // PRIORITY: Mirror successful repopulate to Firebase FIRST
         await mirrorVisaPayload(row.res_nat_dest_cat_type, {
           ...row, // whatever you selected/returned after upsert
           res_nat_dest_cat_type: row.res_nat_dest_cat_type,
@@ -109,7 +109,7 @@ async function repopulateStale(opts: {
         
         return row;
       } catch (error) {
-        // Mirror error status to Firebase
+        // PRIORITY: Mirror error status to Firebase FIRST
         await mirrorVisaStatus(c.res_nat_dest_cat_type, "error", {
           resident_country: c.resident_country,
           nationality: c.nationality,
@@ -168,9 +168,10 @@ app.post("/zen-ai", async (req, res) => {
 
   const supabase = getSupabase();
 
-  // 1) Upsert a placeholder row immediately (so the page has something to key off)
+  // 1) Send to Firebase FIRST for fresh queries
   const baseKey = { resident_country, nationality, destination, visa_category, visa_type };
   const nowISO = new Date().toISOString();
+  const base = { resident_country, nationality, destination, visa_category, visa_type };
 
   // Decide status: if we have a fresh row, keep ready; else queue/refresh
   const { data: existing } = await supabase
@@ -194,6 +195,10 @@ app.post("/zen-ai", async (req, res) => {
     nextStatus = "queued";
   }
 
+  // PRIORITY: Send to Firebase FIRST
+  await mirrorVisaStatus(res_nat_dest_cat_type, nextStatus as any, base);
+
+  // Then update Supabase
   await supabase.from("visa_requirements_cache").upsert({
     ...baseKey,
     res_nat_dest_cat_type,
@@ -203,17 +208,14 @@ app.post("/zen-ai", async (req, res) => {
     onConflict: "resident_country,nationality,destination,visa_category,visa_type"
   });
 
-  // keys & cache_key already built earlier
-  const base = { resident_country, nationality, destination, visa_category, visa_type };
-
-  // mirror placeholder/status to Firestore so FF can listen there too
-  await mirrorVisaStatus(res_nat_dest_cat_type, nextStatus as any, base);
-
   // 2) Fire-and-forget background job to generate (only if not fresh or force_refresh)
   if (!fresh || force_refresh) {
     (async () => {
       try {
-        // Update status to "processing" to show real-time progress
+        // PRIORITY: Update Firebase status to "processing" FIRST
+        await mirrorVisaStatus(res_nat_dest_cat_type, "processing", base);
+        
+        // Then update Supabase status
         await supabase.from("visa_requirements_cache").update({
           status: "processing",
           updated_at: new Date().toISOString()
@@ -228,7 +230,7 @@ app.post("/zen-ai", async (req, res) => {
           provider
         );
 
-        // mirror full payload to Firestore (up already includes all fields)
+        // PRIORITY: Send full payload to Firebase FIRST
         await mirrorVisaPayload(res_nat_dest_cat_type, {
           ...up, // includes all the visa_* fields you store in Supabase
           res_nat_dest_cat_type,
@@ -236,17 +238,18 @@ app.post("/zen-ai", async (req, res) => {
           last_updated: new Date().toISOString(),
         });
         
-        // mark ready
+        // Then mark Supabase as ready
         await supabase.from("visa_requirements_cache").update({
           status: "ready",
           updated_at: new Date().toISOString(),
           last_updated: new Date().toISOString()
         }).match(baseKey);
       } catch (err) {
+        // PRIORITY: Update Firebase error status FIRST
         await mirrorVisaStatus(res_nat_dest_cat_type, "error", base);
         console.error("BG gen error", err);
         
-        // mark error but keep placeholder so UI can show retry
+        // Then mark Supabase error
         await supabase.from("visa_requirements_cache").update({
           status: "error",
           updated_at: new Date().toISOString()
@@ -264,7 +267,7 @@ app.post("/zen-ai", async (req, res) => {
   });
 });
 
-// Secure monthly refresh endpoint (purge stale rows)
+// Secure weekly refresh endpoint (purge stale rows) - runs every Saturday at midnight (UTC)
 app.post("/refresh", async (req, res) => {
   const supabase = getSupabase();
   try {
@@ -280,7 +283,7 @@ app.post("/refresh", async (req, res) => {
   }
 });
 
-// Secure monthly repopulation: re-generate stale rows (not just delete)
+// Secure weekly repopulation: re-generate stale rows (not just delete) - runs every Saturday at midnight (UTC)
 app.post("/repopulate", async (req, res) => {
   try {
     if (req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
@@ -308,8 +311,8 @@ console.log("ENV CHECK:", {
 
 // Internal cron job configuration
 const cronEnabled = process.env.ENABLE_INTERNAL_CRON === "true";
-const cronExpr = process.env.INTERNAL_CRON_EXPR || "0 3 1 * *"; // 03:00 on the 1st (UTC)
-const cronDays = Number(process.env.INTERNAL_CRON_DAYS || 30);
+const cronExpr = process.env.INTERNAL_CRON_EXPR || "0 0 * * 6"; // Every Saturday at midnight (UTC)
+const cronDays = Number(process.env.INTERNAL_CRON_DAYS || 7);
 const cronProvider = (process.env.INTERNAL_CRON_PROVIDER || "openai") as Provider;
 const cronLimit = Number(process.env.INTERNAL_CRON_LIMIT || 100);
 const cronConcurrency = Number(process.env.INTERNAL_CRON_CONCURRENCY || 3);
