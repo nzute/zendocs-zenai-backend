@@ -352,7 +352,7 @@ export function composeUserPrompt(p: {
   nationality: string;
   destination: string;
   visa_category: string;
-  visa_type: "Sticker Visa" | "eVisa" | "Visa on Arrival" | "ETA";
+  visa_type: "Sticker Visa" | "eVisa" | "Visa on Arrival" | "ETA" | "Visa Free";
 }) {
   return `
 Traveler profile:
@@ -424,21 +424,97 @@ export async function callGeminiJson(systemPlusUser: string) {
   return JSON.parse(clean);
 }
 
-        export async function generateAndUpsert(
-          supabase: SupabaseClient,
-          params: {
-            resident_country: string;
-            nationality: string;
-            destination: string;
-            visa_category: string;
-            visa_type: "Sticker Visa" | "eVisa" | "Visa on Arrival" | "ETA";
-            res_nat_dest_cat_type: string;
-          },
-          provider: Provider = "openai"
-        ) {
+        // Determine the best visa type when "Visa Free" is requested
+async function determineBestVisaType(
+  resident_country: string,
+  nationality: string,
+  destination: string,
+  visa_category: string,
+  provider: Provider = "openai"
+): Promise<"eVisa" | "Visa on Arrival" | "Sticker Visa" | "ETA"> {
+  const visaTypes = ["eVisa", "Visa on Arrival", "Sticker Visa", "ETA"];
+  
+  // Try each visa type in order of preference (eVisa is usually fastest/easiest)
+  for (const visaType of visaTypes) {
+    try {
+      const testParams = {
+        resident_country,
+        nationality,
+        destination,
+        visa_category,
+        visa_type: visaType as any,
+        res_nat_dest_cat_type: `${resident_country}${nationality}${destination}${visa_category}${visaType}`
+      };
+      
+      const testPrompt = composeUserPrompt(testParams);
+      const result = provider === "gemini"
+        ? await callGeminiJson(`${SYSTEM_INSTRUCTIONS}\n\n${testPrompt}`)
+        : await callOpenAIJson(SYSTEM_INSTRUCTIONS, testPrompt);
+      
+      const payload = OutputSchema.parse(result);
+      
+      // Check if this visa type is actually available (not visa-free or not applicable)
+      const details = payload.visa_details?.toLowerCase() || "";
+      const eligibility = payload.eligibility_and_documents?.toLowerCase() || "";
+      
+      // If the response indicates this visa type is available and not visa-free
+      if (!details.includes("visa-free") && 
+          !details.includes("no visa required") &&
+          !eligibility.includes("visa-free") &&
+          !eligibility.includes("no visa required") &&
+          !details.includes("not applicable") &&
+          !eligibility.includes("not applicable")) {
+        console.log(`✅ Best visa type determined: ${visaType} for ${nationality} → ${destination}`);
+        return visaType as any;
+      }
+          } catch (e: any) {
+        // Continue to next visa type if this one fails
+        console.log(`⚠️ Visa type ${visaType} not available for ${nationality} → ${destination}:`, e.message || e);
+        continue;
+      }
+  }
+  
+  // Default to eVisa if no specific type is determined
+  console.log(`⚠️ No specific visa type determined, defaulting to eVisa for ${nationality} → ${destination}`);
+  return "eVisa";
+}
+
+export async function generateAndUpsert(
+  supabase: SupabaseClient,
+  params: {
+    resident_country: string;
+    nationality: string;
+    destination: string;
+    visa_category: string;
+    visa_type: "Sticker Visa" | "eVisa" | "Visa on Arrival" | "ETA" | "Visa Free";
+    res_nat_dest_cat_type: string;
+  },
+  provider: Provider = "openai"
+) {
   const combo = { ...params }; // for logs
   try {
-    const userPrompt = composeUserPrompt(params);
+    // If visa_type is "Visa Free", determine the best actual visa type
+    let actualParams = { ...params };
+    if (params.visa_type === "Visa Free") {
+      console.log(`🔍 Determining best visa type for ${params.nationality} → ${params.destination} (Visa Free requested)`);
+      const bestVisaType = await determineBestVisaType(
+        params.resident_country,
+        params.nationality,
+        params.destination,
+        params.visa_category,
+        provider
+      );
+      
+      actualParams = {
+        ...params,
+        visa_type: bestVisaType,
+        res_nat_dest_cat_type: `${params.resident_country}${params.nationality}${params.destination}${params.visa_category}${bestVisaType}`
+      };
+      
+      console.log(`🔄 Using ${bestVisaType} instead of Visa Free for ${params.nationality} → ${params.destination}`);
+    }
+    
+    const userPrompt = composeUserPrompt(actualParams);
 
     let result: any;
     try {
@@ -471,7 +547,7 @@ export async function callGeminiJson(systemPlusUser: string) {
                 // one-shot refinement prompt
                 const refine = await callOpenAIJson(
                   SYSTEM_INSTRUCTIONS,
-                  `Traveller:\n${JSON.stringify(params)}\n\nYour previous output missed the mandatory "After you arrive" paragraph.\nReturn the SAME JSON object again, but update "visa_details" to add that paragraph with deadlines, office/portal, biometrics/medical, documents, fees, and an official link if certain.\nRemember: JSON only.`
+                  `Traveller:\n${JSON.stringify(actualParams)}\n\nYour previous output missed the mandatory "After you arrive" paragraph.\nReturn the SAME JSON object again, but update "visa_details" to add that paragraph with deadlines, office/portal, biometrics/medical, documents, fees, and an official link if certain.\nRemember: JSON only.`
                 );
                 const refined = OutputSchema.parse(refine);
                 payload = refined; // overwrite with refined content
@@ -483,7 +559,7 @@ export async function callGeminiJson(systemPlusUser: string) {
 
                 // Upsert (explicit onConflict for clarity)
             const row = {
-              ...combo,
+              ...actualParams,
               ...payload,
               raw_json: result,
               source: provider,
