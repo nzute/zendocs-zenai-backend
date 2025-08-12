@@ -79,6 +79,7 @@ export async function mirrorVisaPayload(
         status: "ready",
         updated_at: Timestamp.now(),
         created_at: Timestamp.now(),
+        last_updated: Timestamp.now(),
       },
       { merge: true }
     );
